@@ -13,6 +13,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * Fork by Julian Eberius: adds Cereal-based serialization, removes dependency on glog.
  */
 
 #ifndef TDIGEST2_TDIGEST_H_
@@ -24,8 +26,11 @@
 #include <queue>
 #include <utility>
 #include <vector>
+#include <sstream>
 
-#include "glog/logging.h"
+#include <cereal/cereal.hpp>
+#include <cereal/types/vector.hpp>
+#include <cereal/archives/binary.hpp>
 
 namespace tdigest {
 
@@ -46,7 +51,6 @@ class Centroid {
   inline Weight weight() const noexcept { return weight_; }
 
   inline void add(const Centroid& c) {
-    CHECK_GT(c.weight_, 0);
     weight_ += c.weight_;
     mean_ += c.weight_ * (c.mean_ - mean_) / weight_;
   }
@@ -54,6 +58,14 @@ class Centroid {
  private:
   Value mean_ = 0;
   Weight weight_ = 0;
+
+  friend class cereal::access;
+    template<class Archive>
+    void serialize(Archive & ar, const unsigned int version)
+    {
+        ar & mean_;
+        ar & weight_;
+    }
 };
 
 struct CentroidList {
@@ -197,6 +209,7 @@ class TDigest {
         }
       }
     }
+    updateCumulative();
   }
 
   Weight processedWeight() const { return processedWeight_; }
@@ -219,16 +232,11 @@ class TDigest {
 
   // return the cdf on the processed values
   Value cdfProcessed(Value x) const {
-    DLOG(INFO) << "cdf value " << x;
-    DLOG(INFO) << "processed size " << processed_.size();
     if (processed_.size() == 0) {
       // no data to examin_e
-      DLOG(INFO) << "no processed values";
 
       return 0.0;
     } else if (processed_.size() == 1) {
-      DLOG(INFO) << "one processed value "
-                 << " min_ " << min_ << " max_ " << max_;
       // exactly one centroid, should have max_==min_
       auto width = max_ - min_;
       if (x < min_) {
@@ -245,21 +253,15 @@ class TDigest {
     } else {
       auto n = processed_.size();
       if (x <= min_) {
-        DLOG(INFO) << "below min_ "
-                   << " min_ " << min_ << " x " << x;
         return 0;
       }
 
       if (x >= max_) {
-        DLOG(INFO) << "above max_ "
-                   << " max_ " << max_ << " x " << x;
         return 1;
       }
 
       // check for the left tail
       if (x <= mean(0)) {
-        DLOG(INFO) << "left tail "
-                   << " min_ " << min_ << " mean(0) " << mean(0) << " x " << x;
 
         // note that this is different than mean(0) > min_ ... this guarantees interpolation works
         if (mean(0) - min_ > 0) {
@@ -271,8 +273,6 @@ class TDigest {
 
       // and the right tail
       if (x >= mean(n - 1)) {
-        DLOG(INFO) << "right tail"
-                   << " max_ " << max_ << " mean(n - 1) " << mean(n - 1) << " x " << x;
 
         if (max_ - mean(n - 1) > 0) {
           return 1.0 - (max_ - x) / (max_ - mean(n - 1)) * weight(n - 1) / processedWeight_ / 2.0;
@@ -287,10 +287,6 @@ class TDigest {
       auto i = std::distance(processed_.cbegin(), iter);
       auto z1 = x - (iter - 1)->mean();
       auto z2 = (iter)->mean() - x;
-      CHECK_LE(0.0, z1);
-      CHECK_LE(0.0, z2);
-      DLOG(INFO) << "middle "
-                 << " z1 " << z1 << " z2 " << z2 << " x " << x;
 
       return weightedAverage(cumulative_[i - 1], z2, cumulative_[i], z1) / processedWeight_;
     }
@@ -306,7 +302,6 @@ class TDigest {
   // the value will not represent the unprocessed values
   Value quantileProcessed(Value q) const {
     if (q < 0 || q > 1) {
-      LOG(ERROR) << "q should be in [0,1], got " << q;
       return NAN;
     }
 
@@ -327,7 +322,6 @@ class TDigest {
 
     // at the boundaries, we return min_ or max_
     if (index < weight(0) / 2.0) {
-      CHECK_GT(weight(0), 0);
       return min_ + 2.0 * index / weight(0) * (mean(0) - min_);
     }
 
@@ -337,12 +331,8 @@ class TDigest {
       auto i = std::distance(cumulative_.cbegin(), iter);
       auto z1 = index - *(iter - 1);
       auto z2 = *(iter)-index;
-      // LOG(INFO) << "z2 " << z2 << " index " << index << " z1 " << z1;
       return weightedAverage(mean(i - 1), z2, mean(i), z1);
     }
-
-    CHECK_LE(index, processedWeight_);
-    CHECK_GE(index, processedWeight_ - weight(n - 1) / 2.0);
 
     auto z1 = index - processedWeight_ - weight(n - 1) / 2.0;
     auto z2 = weight(n - 1) / 2 - z1;
@@ -377,6 +367,25 @@ class TDigest {
         process();
       }
     }
+  }
+
+  std::string serialize() {
+    std::stringstream stream;
+    {
+      cereal::BinaryOutputArchive oa(stream);
+      oa << *this;
+    }
+    return stream.str();
+  }
+
+  static tdigest::TDigest deserialize(std::string s) {
+    tdigest::TDigest result;
+    {
+      std::stringstream stream(s);
+      cereal::BinaryInputArchive ia(stream);
+      ia >> result;
+    }
+    return result;
   }
 
  private:
@@ -445,7 +454,6 @@ class TDigest {
     }
 
     std::vector<Centroid> sorted;
-    LOG(INFO) << "total " << total;
     sorted.reserve(total);
 
     while (!pq.empty()) {
@@ -514,9 +522,7 @@ class TDigest {
     }
     unprocessed_.clear();
     min_ = std::min(min_, processed_[0].mean());
-    DLOG(INFO) << "new min_ " << min_;
     max_ = std::max(max_, (processed_.cend() - 1)->mean());
-    DLOG(INFO) << "new max_ " << max_;
     updateCumulative();
   }
 
@@ -531,13 +537,9 @@ class TDigest {
       auto dq = w / total;
       auto k2 = integratedLocation(q + dq);
       if (k2 - k1 > 1 && w != 1) {
-        LOG(WARNING) << "Oversize centroid at " << std::distance(sorted.cbegin(), iter) << " k1 " << k1 << " k2 " << k2
-                     << " dk " << (k2 - k1) << " w " << w << " q " << q;
         badWeight++;
       }
       if (k2 - k1 > 1.5 && w != 1) {
-        LOG(ERROR) << "Egregiously Oversize centroid at " << std::distance(sorted.cbegin(), iter) << " k1 " << k1
-                   << " k2 " << k2 << " dk " << (k2 - k1) << " w " << w << " q " << q;
         badWeight++;
       }
       q += dq;
@@ -589,7 +591,6 @@ class TDigest {
    * <code>x2</code>.
    */
   static Value weightedAverageSorted(Value x1, Value w1, Value x2, Value w2) {
-    CHECK_LE(x1, x2);
     const Value x = (x1 * w1 + x2 * w2) / (w1 + w2);
     return std::max(x1, std::min(x, x2));
   }
@@ -613,6 +614,22 @@ class TDigest {
     const auto previousWeight = (nextIndex - index) / delta;
     const auto nextWeight = (index - previousIndex) / delta;
     return previousMean * previousWeight + nextMean * nextWeight;
+  }
+
+  friend class cereal::access;
+  template<class Archive>
+  void serialize(Archive & ar, const unsigned int version)
+  {
+    ar & compression_;
+    ar & min_;
+    ar & max_;
+    ar & maxProcessed_;
+    ar & maxUnprocessed_;
+    ar & processedWeight_;
+    ar & unprocessedWeight_;
+    ar & processed_;
+    ar & unprocessed_;
+    ar & cumulative_;
   }
 };
 
