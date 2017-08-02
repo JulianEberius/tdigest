@@ -51,8 +51,14 @@ class Centroid {
   inline Weight weight() const noexcept { return weight_; }
 
   inline void add(const Centroid& c) {
-    weight_ += c.weight_;
-    mean_ += c.weight_ * (c.mean_ - mean_) / weight_;
+    CHECK_GT(c.weight_, 0);
+    if( weight_ != 0.0 ) {
+      weight_ += c.weight_;
+      mean_ += c.weight_ * (c.mean_ - mean_) / weight_;
+    } else {
+      weight_ = c.weight_;
+      mean_ = c.mean_;
+    }
   }
 
  private:
@@ -208,6 +214,7 @@ class TDigest {
           totalSize = 0;
         }
       }
+      updateCumulative();
     }
     updateCumulative();
   }
