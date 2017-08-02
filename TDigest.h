@@ -51,7 +51,6 @@ class Centroid {
   inline Weight weight() const noexcept { return weight_; }
 
   inline void add(const Centroid& c) {
-    CHECK_GT(c.weight_, 0);
     if( weight_ != 0.0 ) {
       weight_ += c.weight_;
       mean_ += c.weight_ * (c.mean_ - mean_) / weight_;
