@@ -216,7 +216,6 @@ class TDigest {
       }
       updateCumulative();
     }
-    updateCumulative();
   }
 
   Weight processedWeight() const { return processedWeight_; }
